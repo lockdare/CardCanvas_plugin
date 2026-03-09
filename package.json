@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-sample-plugin",
+	"name": "Heinibal's CarnCavas",
 	"version": "0.9.0",
-	"description": "A cardcanvas view plugin for Obsidian",
+	"description": "File card canvas view: display files as cards (title, tags, mod date). Click to edit in right pane.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
