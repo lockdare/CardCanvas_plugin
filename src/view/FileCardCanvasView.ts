@@ -3,14 +3,11 @@ import {
 	FileView,
 	WorkspaceLeaf,
 	TFile,
-	CachedMetadata,
 	Notice,
-	parseFrontMatterTags,
 } from "obsidian";
 import type {
 	CanvasData,
 	CanvasFileData,
-	CanvasTextData,
 	CanvasGroupData,
 	CanvasEdgeData,
 	AllCanvasNodeData,
@@ -20,7 +17,6 @@ import type {
 export const FILE_CARD_CANVAS_VIEW_TYPE = "file-card-canvas";
 export const HCANVAS_EXT = "hcanvas";
 
-const LONG_PRESS_MS = 150;
 const DRAG_THRESHOLD_PX = 5;
 const CANVAS_SIZE_PX = 120000;
 const MIN_NODE_WIDTH = 160;
@@ -56,7 +52,6 @@ export class FileCardCanvasView extends FileView {
 	private pan = { x: 0, y: 0 };
 	private isPanning = false;
 	private panStart = { x: 0, y: 0 };
-	private longPressTimer: ReturnType<typeof setTimeout> | null = null;
 	private nodeMouseDownPos: { x: number; y: number } | null = null;
 	private nodeMouseDownId: string | null = null;
 	private didDragThisPointer = false;
@@ -123,7 +118,6 @@ export class FileCardCanvasView extends FileView {
 	}
 
 	async onUnloadFile(): Promise<void> {
-		this.clearLongPressTimer();
 		this.closeEdgeLabelEditor();
 		this.closeDetailLeaf();
 		await this.saveCanvasData();
@@ -140,14 +134,14 @@ export class FileCardCanvasView extends FileView {
 			if (!(file instanceof TFile) || !oldPath) return;
 			let changed = false;
 			for (const node of this.canvasData.nodes) {
-				if (node.type === "file" && (node as CanvasFileData).file === oldPath) {
-					(node as CanvasFileData).file = file.path;
+				if (node.type === "file" && node.file === oldPath) {
+					node.file = file.path;
 					changed = true;
 				}
 			}
 			if (!changed) return;
 			this.renderCanvas();
-			this.saveCanvasData();
+			void this.saveCanvasData();
 		}));
 	}
 
@@ -190,13 +184,6 @@ export class FileCardCanvasView extends FileView {
 		await this.app.vault.modify(this.file, JSON.stringify(this.canvasData, null, 2));
 	}
 
-	private clearLongPressTimer(): void {
-		if (this.longPressTimer) {
-			clearTimeout(this.longPressTimer);
-			this.longPressTimer = null;
-		}
-	}
-
 	private renderCanvas(): void {
 		this.closeEdgeLabelEditor();
 		this.contentEl.empty();
@@ -206,7 +193,7 @@ export class FileCardCanvasView extends FileView {
 		const toolbar = this.contentEl.createDiv({ cls: "heinibal-canvas-toolbar" });
 		toolbar.createEl("button", { text: "Add files" }).onclick = () => this.showAddFilesModal();
 		toolbar.createEl("button", { text: "Add group" }).onclick = () => this.addGroup();
-		toolbar.createEl("button", { text: "New canvas", title: "Create new canvas file" }).onclick = () => this.createNewCanvasFile();
+		toolbar.createEl("button", { text: "New canvas", title: "Create new canvas file" }).onclick = () => void this.createNewCanvasFile();
 
 		const viewport = this.contentEl.createDiv({ cls: "heinibal-canvas-viewport" });
 		this.canvasStageEl = viewport.createDiv({ cls: "heinibal-canvas-stage" });
@@ -299,7 +286,7 @@ export class FileCardCanvasView extends FileView {
 			const hadNodeDrag = this.draggedNodeId !== null;
 			if (this.resizeState) {
 				this.resizeState = null;
-				this.saveCanvasData();
+				void this.saveCanvasData();
 			}
 			if (this.edgeFrom) {
 					const wrapper = document.elementFromPoint(e.clientX, e.clientY)?.closest(".heinibal-node-wrapper");
@@ -322,19 +309,19 @@ export class FileCardCanvasView extends FileView {
 							toOffset,
 						});
 						this.renderEdges();
-						this.saveCanvasData();
+						void this.saveCanvasData();
 					}
 				}
 				this.finishEdge();
 			}
 			if (this.draggedEdgeControlId) {
 				this.draggedEdgeControlId = null;
-				this.saveCanvasData();
+				void this.saveCanvasData();
 			}
 			this.isPanning = false;
 			this.draggedNodeId = null;
 			if (hadNodeDrag) {
-				this.saveCanvasData();
+				void this.saveCanvasData();
 			}
 		});
 
@@ -432,7 +419,7 @@ export class FileCardCanvasView extends FileView {
 					}
 				}
 			}
-			if (added.size > 0) this.saveCanvasData();
+			if (added.size > 0) void this.saveCanvasData();
 			if (duplicated.size > 0) {
 				const count = duplicated.size;
 				new Notice(`File already exists on canvas (${count})`, 2500);
@@ -519,7 +506,9 @@ export class FileCardCanvasView extends FileView {
 											extractFromText(s);
 											try {
 												collectJsonValues(JSON.parse(s));
-											} catch {}
+											} catch {
+												// Ignore non-JSON drag string payload.
+											}
 										}
 										resolve();
 									});
@@ -536,7 +525,9 @@ export class FileCardCanvasView extends FileView {
 					extractFromText(pathLike);
 				}
 			}
-		} catch {}
+		} catch {
+			// Ignore malformed drag payloads.
+		}
 
 		return [...out];
 	}
@@ -551,7 +542,9 @@ export class FileCardCanvasView extends FileView {
 				const url = new URL(raw);
 				const fileParam = url.searchParams.get("file");
 				if (fileParam) normalizedToken = fileParam;
-			} catch {}
+			} catch {
+				// Ignore invalid Obsidian URL payload.
+			}
 		}
 
 		const clean = normalizedToken
@@ -654,34 +647,31 @@ export class FileCardCanvasView extends FileView {
 
 			const hitPath = document.createElementNS(svgNS, "path");
 			hitPath.setAttribute("d", d);
-			hitPath.setAttribute("fill", "none");
-			hitPath.setAttribute("stroke", "transparent");
-			hitPath.setAttribute("stroke-width", "16");
-			hitPath.setAttribute("class", "heinibal-edge-path");
-			hitPath.style.pointerEvents = "stroke";
-			hitPath.style.cursor = "pointer";
-			g.appendChild(hitPath);
+				hitPath.setAttribute("fill", "none");
+				hitPath.setAttribute("stroke", "transparent");
+				hitPath.setAttribute("stroke-width", "16");
+				hitPath.setAttribute("class", "heinibal-edge-path heinibal-edge-hit");
+				g.appendChild(hitPath);
 
 			const path = document.createElementNS(svgNS, "path");
 			const color = this.resolveColor(edge.color);
 			path.setAttribute("d", d);
 			path.setAttribute("fill", "none");
 			path.setAttribute("stroke", color);
-			path.setAttribute("stroke-width", "2");
-			path.setAttribute("marker-end", "url(#arrowhead)");
-			path.setAttribute("class", "heinibal-edge-path-visible");
-			path.style.pointerEvents = "none";
-			g.appendChild(path);
+				path.setAttribute("stroke-width", "2");
+				path.setAttribute("marker-end", "url(#arrowhead)");
+				path.setAttribute("class", "heinibal-edge-path-visible heinibal-edge-visible");
+				g.appendChild(path);
 
 			const text = document.createElementNS(svgNS, "text");
 			text.setAttribute("x", String(labelPt.x));
 			text.setAttribute("y", String(labelPt.y));
 			text.setAttribute("text-anchor", "middle");
 			text.setAttribute("dominant-baseline", "middle");
-				text.setAttribute("class", "heinibal-edge-label");
-				text.setAttribute("font-size", "12");
-				text.textContent = edge.label ?? "";
-				text.style.cursor = "text";
+					text.setAttribute("class", "heinibal-edge-label");
+					text.setAttribute("font-size", "12");
+					text.textContent = edge.label ?? "";
+					text.addClass("heinibal-edge-label-editable");
 				text.addEventListener("dblclick", (ev) => {
 					ev.preventDefault();
 					ev.stopPropagation();
@@ -693,9 +683,7 @@ export class FileCardCanvasView extends FileView {
 				handle.setAttribute("cx", String(handlePt.x));
 				handle.setAttribute("cy", String(handlePt.y));
 				handle.setAttribute("r", "8");
-			handle.setAttribute("class", "heinibal-edge-handle");
-			handle.style.pointerEvents = "all";
-			handle.style.cursor = "grab";
+				handle.setAttribute("class", "heinibal-edge-handle heinibal-edge-handle-draggable");
 			handle.addEventListener("mousedown", (ev: MouseEvent) => {
 				ev.preventDefault();
 				ev.stopPropagation();
@@ -714,7 +702,7 @@ export class FileCardCanvasView extends FileView {
 				ev.preventDefault();
 				this.canvasData.edges = this.canvasData.edges.filter((it) => it.id !== edge.id);
 				this.renderEdges();
-				this.saveCanvasData();
+				void this.saveCanvasData();
 			});
 			hitPath.addEventListener("dblclick", (ev: MouseEvent) => {
 				ev.preventDefault();
@@ -892,7 +880,7 @@ export class FileCardCanvasView extends FileView {
 		const apply = () => {
 			edge.label = input.value.trim() || undefined;
 			this.renderEdges();
-			this.saveCanvasData();
+			void this.saveCanvasData();
 			this.closeEdgeLabelEditor();
 		};
 
@@ -958,14 +946,15 @@ export class FileCardCanvasView extends FileView {
 	private refreshNodeCardById(nodeId: string): void {
 		const node = this.canvasData.nodes.find((n) => n.id === nodeId);
 		if (!node) return;
-		const wrapper = this.nodesContainer?.querySelector(`.heinibal-node-wrapper[data-node-id="${nodeId}"]`) as HTMLElement | null;
+		const wrapper = this.nodesContainer?.querySelector(`.heinibal-node-wrapper[data-node-id="${nodeId}"]`);
 		if (!wrapper) return;
-		const nodeEl = wrapper.querySelector(".heinibal-canvas-node") as HTMLElement | null;
+		const nodeEl = wrapper.querySelector(".heinibal-canvas-node");
 		if (!nodeEl) return;
+		if (!(nodeEl instanceof HTMLElement)) return;
 		nodeEl.empty();
-		if (node.type === "file") this.renderFileCard(nodeEl, node as CanvasFileData);
+		if (node.type === "file") this.renderFileCard(nodeEl, node);
 		else if (node.type === "text") this.renderTextNode(nodeEl, node);
-		else if (node.type === "group") this.renderGroupNode(nodeEl, node as CanvasGroupData);
+		else if (node.type === "group") this.renderGroupNode(nodeEl, node);
 		else if (node.type === "link") this.renderLinkNode(nodeEl, node);
 	}
 
@@ -975,7 +964,7 @@ export class FileCardCanvasView extends FileView {
 		if (this.canvasData.nodes.length === before) return;
 		this.canvasData.edges = this.canvasData.edges.filter((e) => e.fromNode !== nodeId && e.toNode !== nodeId);
 		this.renderCanvas();
-		this.saveCanvasData();
+		void this.saveCanvasData();
 	}
 
 	private applyNodeResize(e: MouseEvent): void {
@@ -1010,8 +999,10 @@ export class FileCardCanvasView extends FileView {
 		s.node.width = width;
 		s.node.height = height;
 
-		s.wrapper.style.left = `${x}px`;
-		s.wrapper.style.top = `${y}px`;
+		s.wrapper.setCssProps({
+			left: `${x}px`,
+			top: `${y}px`,
+		});
 		s.wrapper.style.width = `${width}px`;
 		s.wrapper.style.height = `${height}px`;
 		s.nodeEl.style.width = `${width}px`;
@@ -1024,13 +1015,13 @@ export class FileCardCanvasView extends FileView {
 		wrapper.dataset.nodeId = node.id ?? "";
 
 		const nodeEl = wrapper.createDiv({ cls: "heinibal-canvas-node" });
-		nodeEl.style.left = "0";
-		nodeEl.style.top = "0";
 		nodeEl.style.width = `${node.width}px`;
 		nodeEl.style.height = `${node.height}px`;
 
-		wrapper.style.left = `${node.x}px`;
-		wrapper.style.top = `${node.y}px`;
+		wrapper.setCssProps({
+			left: `${node.x}px`,
+			top: `${node.y}px`,
+		});
 		wrapper.style.width = `${node.width}px`;
 		wrapper.style.height = `${node.height}px`;
 
@@ -1039,11 +1030,11 @@ export class FileCardCanvasView extends FileView {
 		this.applyShape(nodeEl, node.shape);
 
 		if (node.type === "file") {
-			this.renderFileCard(nodeEl, node as CanvasFileData);
+			this.renderFileCard(nodeEl, node);
 		} else if (node.type === "text") {
 			this.renderTextNode(nodeEl, node);
 		} else if (node.type === "group") {
-			this.renderGroupNode(nodeEl, node as CanvasGroupData);
+			this.renderGroupNode(nodeEl, node);
 		} else if (node.type === "link") {
 			this.renderLinkNode(nodeEl, node);
 		}
@@ -1073,8 +1064,10 @@ export class FileCardCanvasView extends FileView {
 					node.x = e.clientX - this.dragOffset.x;
 					node.y = e.clientY - this.dragOffset.y;
 				}
-				wrapper.style.left = `${node.x}px`;
-				wrapper.style.top = `${node.y}px`;
+				wrapper.setCssProps({
+					left: `${node.x}px`,
+					top: `${node.y}px`,
+				});
 				this.renderEdges();
 			} else if (
 				this.nodeMouseDownPos &&
@@ -1189,7 +1182,7 @@ export class FileCardCanvasView extends FileView {
 		this.tempEdgeContainer.setAttribute("width", String(CANVAS_SIZE_PX));
 		this.tempEdgeContainer.setAttribute("height", String(CANVAS_SIZE_PX));
 		this.tempEdgeContainer.setAttribute("overflow", "visible");
-		this.tempEdgeContainer.style.pointerEvents = "none";
+		this.tempEdgeContainer.addClass("heinibal-temp-edge-passive");
 		this.edgeLineEl = document.createElementNS("http://www.w3.org/2000/svg", "path");
 		this.tempEdgeContainer.appendChild(this.edgeLineEl);
 		stage.appendChild(this.tempEdgeContainer);
@@ -1236,9 +1229,9 @@ export class FileCardCanvasView extends FileView {
 		this.refreshNodeCardById(node.id);
 
 		if (node.type === "file") {
-			const file = this.app.vault.getAbstractFileByPath((node as CanvasFileData).file);
+			const file = this.app.vault.getAbstractFileByPath(node.file);
 			if (file instanceof TFile) {
-				this.openFileInRightPane(file);
+				void this.openFileInRightPane(file);
 			}
 		}
 
@@ -1272,10 +1265,10 @@ export class FileCardCanvasView extends FileView {
 		}
 
 		if (node.type === "file") {
-			const file = this.app.vault.getAbstractFileByPath((node as CanvasFileData).file);
+			const file = this.app.vault.getAbstractFileByPath(node.file);
 			if (file instanceof TFile) {
 				const openBtn = panel.createEl("button", { text: "Open in right", title: "Already opened; click to focus" });
-				openBtn.onclick = () => this.openFileInRightPane(file);
+				openBtn.onclick = () => void this.openFileInRightPane(file);
 			}
 		}
 
@@ -1297,32 +1290,32 @@ export class FileCardCanvasView extends FileView {
 			input.oninput = () => {
 				(node as CanvasFileData & { title?: string }).title = input.value.trim() || undefined;
 				const titleEl = nodeEl.querySelector(".heinibal-file-title");
-				if (titleEl) titleEl.textContent = this.getFileNodeDisplayTitle(node as CanvasFileData);
-				this.saveCanvasData();
+				if (titleEl) titleEl.textContent = this.getFileNodeDisplayTitle(node);
+				void this.saveCanvasData();
 			};
 			return;
 		}
 
 		if (node.type === "text") {
 			const input = row.createEl("textarea", { cls: "heinibal-panel-textarea" });
-			input.value = String((node as CanvasTextData).text ?? "");
+			input.value = String((node).text ?? "");
 			input.oninput = () => {
-				(node as CanvasTextData).text = input.value;
+				(node).text = input.value;
 				const textEl = nodeEl.querySelector(".heinibal-text-content");
 				if (textEl) textEl.textContent = input.value;
-				this.saveCanvasData();
+				void this.saveCanvasData();
 			};
 			return;
 		}
 
 		if (node.type === "group") {
 			const input = row.createEl("input", { type: "text", placeholder: "Group name" });
-			input.value = (node as CanvasGroupData).label ?? "";
+			input.value = (node).label ?? "";
 			input.oninput = () => {
-				(node as CanvasGroupData).label = input.value.trim() || "Group";
+				(node).label = input.value.trim() || "Group";
 				const labelEl = nodeEl.querySelector(".heinibal-node-label");
-				if (labelEl) labelEl.textContent = (node as CanvasGroupData).label ?? "Group";
-				this.saveCanvasData();
+				if (labelEl) labelEl.textContent = (node).label ?? "Group";
+				void this.saveCanvasData();
 			};
 			return;
 		}
@@ -1334,7 +1327,7 @@ export class FileCardCanvasView extends FileView {
 				(node as { url?: string }).url = input.value.trim();
 				const labelEl = nodeEl.querySelector(".heinibal-node-label");
 				if (labelEl) labelEl.textContent = (node as { url?: string }).url ?? "";
-				this.saveCanvasData();
+				void this.saveCanvasData();
 			};
 		}
 	}
@@ -1355,13 +1348,13 @@ export class FileCardCanvasView extends FileView {
 	private setNodeColor(node: AllCanvasNodeData, nodeEl: HTMLElement, hexOrVar: string): void {
 		node.color = hexOrVar;
 		nodeEl.style.borderLeftColor = hexOrVar;
-		this.saveCanvasData();
+		void this.saveCanvasData();
 	}
 
 	private setNodeShape(node: AllCanvasNodeData, nodeEl: HTMLElement, shape: NodeShape): void {
 		node.shape = shape;
 		this.applyShape(nodeEl, shape);
-		this.saveCanvasData();
+		void this.saveCanvasData();
 	}
 
 	private hideSubmenu(): void {
@@ -1425,24 +1418,11 @@ export class FileCardCanvasView extends FileView {
 		const file = resolvedFile ?? this.app.vault.getAbstractFileByPath(node.file);
 		if (!(file instanceof TFile)) return "File not found";
 		const cache = this.app.metadataCache.getFileCache(file);
-		return cache?.frontmatter?.title ?? file.basename;
-	}
-
-	private getFileTags(file: TFile, cache: CachedMetadata | null): string[] {
-		const tags: string[] = [];
-		if (cache?.tags) {
-			for (const t of cache.tags) {
-				if (t.tag && !tags.includes(t.tag)) tags.push(t.tag);
-			}
-		}
-		const fmTags = parseFrontMatterTags(cache?.frontmatter);
-		if (fmTags) {
-			for (const t of fmTags) {
-				const tag = t.startsWith("#") ? t : `#${t}`;
-				if (!tags.includes(tag)) tags.push(tag);
-			}
-		}
-		return tags.slice(0, 5);
+		const frontmatter = cache?.frontmatter as Record<string, unknown> | undefined;
+		const frontmatterTitle = frontmatter?.["title"];
+		return typeof frontmatterTitle === "string" && frontmatterTitle.trim().length > 0
+			? frontmatterTitle
+			: file.basename;
 	}
 
 	private renderTextNode(container: HTMLElement, node: AllCanvasNodeData): void {
@@ -1504,8 +1484,10 @@ export class FileCardCanvasView extends FileView {
 
 		const modal = document.createElement("div");
 		modal.className = "heinibal-add-files-modal";
-		modal.innerHTML = '<div class="heinibal-modal-content"><h3>Add files to canvas</h3><div class="heinibal-file-list"></div><button class="heinibal-modal-close">Close</button></div>';
-		const list = modal.querySelector(".heinibal-file-list") as HTMLElement;
+		const content = modal.createDiv({ cls: "heinibal-modal-content" });
+		content.createEl("h3", { text: "Add files to canvas" });
+		const list = content.createDiv({ cls: "heinibal-file-list" });
+		const closeBtn = content.createEl("button", { text: "Close", cls: "heinibal-modal-close" });
 
 		for (const file of files) {
 			if (existingPaths.has(file.path)) continue;
@@ -1518,7 +1500,7 @@ export class FileCardCanvasView extends FileView {
 			};
 		}
 
-		modal.querySelector(".heinibal-modal-close")?.addEventListener("click", () => modal.remove());
+		closeBtn.addEventListener("click", () => modal.remove());
 		modal.addEventListener("click", (e) => { if (e.target === modal) modal.remove(); });
 		document.body.appendChild(modal);
 	}
@@ -1540,7 +1522,7 @@ export class FileCardCanvasView extends FileView {
 		};
 		data.nodes.push(node);
 		this.renderNode(node);
-		this.saveCanvasData();
+		void this.saveCanvasData();
 	}
 
 	private addGroup(): void {
@@ -1557,6 +1539,6 @@ export class FileCardCanvasView extends FileView {
 		};
 		data.nodes.push(node);
 		this.renderNode(node);
-		this.saveCanvasData();
+		void this.saveCanvasData();
 	}
 }

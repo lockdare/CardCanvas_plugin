@@ -1,26 +1,25 @@
-import {App, Plugin, PluginSettingTab, Setting} from "obsidian";
-import type { CanvasData } from "./types";
+import { App, Plugin, PluginSettingTab, Setting } from "obsidian";
 
-export interface MyPluginSettings {
+export interface HeinibalPluginSettings {
 	mySetting: string;
 	defaultCanvasFolder?: string;
 }
 
-export const DEFAULT_SETTINGS: MyPluginSettings = {
+export const DEFAULT_SETTINGS: HeinibalPluginSettings = {
 	mySetting: "default",
 	defaultCanvasFolder: "",
 };
 
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: Plugin & { settings: MyPluginSettings; saveSettings: () => Promise<void> };
+export class HeinibalSettingTab extends PluginSettingTab {
+	plugin: Plugin & { settings: HeinibalPluginSettings; saveSettings: () => Promise<void> };
 
-	constructor(app: App, plugin: Plugin & { settings: MyPluginSettings; saveSettings: () => Promise<void> }) {
+	constructor(app: App, plugin: Plugin & { settings: HeinibalPluginSettings; saveSettings: () => Promise<void> }) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
@@ -29,7 +28,7 @@ export class SampleSettingTab extends PluginSettingTab {
 			.setDesc("Folder for new .hcanvas files (leave empty for vault root)")
 			.addText((text) =>
 				text
-					.setPlaceholder("e.g. Canvases")
+					.setPlaceholder("For example: canvases")
 					.setValue(this.plugin.settings.defaultCanvasFolder ?? "")
 					.onChange(async (value) => {
 						this.plugin.settings.defaultCanvasFolder = value;

@@ -1,10 +1,10 @@
-import { App, Plugin } from "obsidian";
-import { DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab } from "./settings";
+import { Plugin } from "obsidian";
+import { DEFAULT_SETTINGS, HeinibalPluginSettings, HeinibalSettingTab } from "./settings";
 import { FileCardCanvasView, FILE_CARD_CANVAS_VIEW_TYPE } from "./view/FileCardCanvasView";
 import type { CanvasData } from "./types";
 
 export default class HeinibalPlugin extends Plugin {
-	settings: MyPluginSettings;
+	settings: HeinibalPluginSettings;
 
 	async onload() {
 		await this.loadSettings();
@@ -16,32 +16,32 @@ export default class HeinibalPlugin extends Plugin {
 		this.registerExtensions([FileCardCanvasView.HCANVAS_EXT], FILE_CARD_CANVAS_VIEW_TYPE);
 
 		this.addRibbonIcon("layout-grid", "Create new file card canvas", () => {
-			this.createNewCanvasFile();
+			void this.createNewCanvasFile();
 		});
 
 		this.addCommand({
 			id: "open-file-card-canvas",
 			name: "Open file card canvas",
-			callback: () => this.activateView(),
+			callback: () => void this.activateView(),
 		});
 		this.addCommand({
 			id: "create-file-card-canvas",
 			name: "Create new file card canvas",
-			callback: () => this.createNewCanvasFile(),
+			callback: () => void this.createNewCanvasFile(),
 		});
 
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		this.addSettingTab(new HeinibalSettingTab(this.app, this));
 	}
 
 	onunload() {
-		this.app.workspace.detachLeavesOfType(FILE_CARD_CANVAS_VIEW_TYPE);
+		
 	}
 
 	async loadSettings() {
 		this.settings = Object.assign(
 			{},
 			DEFAULT_SETTINGS,
-			(await this.loadData()) as Partial<MyPluginSettings>
+			(await this.loadData()) as Partial<HeinibalPluginSettings>
 		);
 	}
 
@@ -52,7 +52,7 @@ export default class HeinibalPlugin extends Plugin {
 	async activateView() {
 		const leaves = this.app.workspace.getLeavesOfType(FILE_CARD_CANVAS_VIEW_TYPE);
 		if (leaves.length > 0) {
-			this.app.workspace.revealLeaf(leaves[0]!);
+			await this.app.workspace.revealLeaf(leaves[0]!);
 		} else {
 			await this.createNewCanvasFile();
 		}
