@@ -1,4 +1,4 @@
-import { Plugin } from "obsidian";
+import { Plugin, TAbstractFile, TFile, TFolder } from "obsidian";
 import { DEFAULT_SETTINGS, HeinibalPluginSettings, HeinibalSettingTab } from "./settings";
 import { FileCardCanvasView, FILE_CARD_CANVAS_VIEW_TYPE } from "./view/FileCardCanvasView";
 import type { CanvasData } from "./types";
@@ -20,21 +20,32 @@ export default class HeinibalPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			// id: "open-file-card-canvas",
-			// name: "Open file card canvas",
+			id: "open-file-card-canvas",
+			name: "Open file card canvas",
 			callback: () => void this.activateView(),
 		});
 		this.addCommand({
-			// id: "create-file-card-canvas",
-			// name: "Create new file card canvas",
+			id: "create-file-card-canvas",
+			name: "Create new file card canvas",
 			callback: () => void this.createNewCanvasFile(),
 		});
 
 		this.addSettingTab(new HeinibalSettingTab(this.app, this));
+
+		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
+			menu.addItem((item) => {
+				item
+					.setTitle("Create canvas file manager")
+					.setIcon("layout-grid")
+					.onClick(() => {
+						const folderPath = this.resolveFolderPathForMenuTarget(file);
+						void this.createNewCanvasFile(folderPath);
+					});
+			});
+		}));
 	}
 
 	onunload() {
-		
 	}
 
 	async loadSettings() {
@@ -62,19 +73,53 @@ export default class HeinibalPlugin extends Plugin {
 		return (this.settings.defaultCanvasFolder ?? "").trim();
 	}
 
-	async createNewCanvasFile() {
-		const folder = this.defaultCanvasFolder || null;
-		const base = "Untitled Canvas";
-		let name = `${base}.${FileCardCanvasView.HCANVAS_EXT}`;
-		let n = 0;
-		while (this.app.vault.getAbstractFileByPath(folder ? `${folder}/${name}` : name)) {
-			n++;
-			name = `${base} ${n}.${FileCardCanvasView.HCANVAS_EXT}`;
-		}
-		const path = folder ? `${folder}/${name}` : name;
+	private resolveFolderPathForMenuTarget(file: TAbstractFile | null): string | null {
+		if (!file) return this.defaultCanvasFolder || null;
+		if (file instanceof TFolder) return file.path;
+		if (file instanceof TFile) return file.parent?.path ?? null;
+		return this.defaultCanvasFolder || null;
+	}
+
+	async createNewCanvasFile(folderPath?: string | null) {
+		const baseFolder = folderPath ?? this.defaultCanvasFolder;
+		const folder = (baseFolder ?? "").trim() || null;
+		const path = this.getNextAvailableFilePath(folder, "Untitled Canvas", FileCardCanvasView.HCANVAS_EXT);
 		const data: CanvasData = { nodes: [], edges: [] };
 		const file = await this.app.vault.create(path, JSON.stringify(data, null, 2));
 		const leaf = this.app.workspace.getLeaf("split", "vertical");
 		await leaf.openFile(file);
+	}
+
+	private getNextAvailableFilePath(folder: string | null, base: string, ext: string): string {
+		const normalizedFolder = folder?.trim() || "";
+		const inFolder = this.app.vault.getFiles().filter((f) => {
+			const parentPath = f.parent?.path ?? "";
+			return parentPath === normalizedFolder;
+		});
+		const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const escapedExt = ext.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const pattern = new RegExp(`^${escapedBase}(?:\\s*(\\d+))?\\.${escapedExt}$`, "i");
+		const used = new Set<number>();
+		for (const file of inFolder) {
+			const match = file.name.match(pattern);
+			if (!match) continue;
+			if (!match[1]) {
+				used.add(0);
+				continue;
+			}
+			const index = Number(match[1]);
+			if (Number.isFinite(index) && index >= 0) used.add(index);
+		}
+		let next = 0;
+		while (used.has(next)) next++;
+
+		for (let attempt = 0; attempt < 10000; attempt++) {
+			const candidateName = next === 0 ? `${base}.${ext}` : `${base} ${next}.${ext}`;
+			const candidatePath = normalizedFolder ? `${normalizedFolder}/${candidateName}` : candidateName;
+			if (!this.app.vault.getAbstractFileByPath(candidatePath)) return candidatePath;
+			next++;
+		}
+		const fallbackName = `${base}-${Date.now()}.${ext}`;
+		return normalizedFolder ? `${normalizedFolder}/${fallbackName}` : fallbackName;
 	}
 }

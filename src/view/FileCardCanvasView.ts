@@ -1,4 +1,4 @@
-import {
+﻿import {
 	App,
 	FileView,
 	WorkspaceLeaf,
@@ -13,6 +13,7 @@ import type {
 	AllCanvasNodeData,
 	NodeShape,
 	NodeSide,
+	EdgeStyle,
 } from "../types";
 export const FILE_CARD_CANVAS_VIEW_TYPE = "file-card-canvas";
 export const HCANVAS_EXT = "hcanvas";
@@ -193,7 +194,6 @@ export class FileCardCanvasView extends FileView {
 		const toolbar = this.contentEl.createDiv({ cls: "heinibal-canvas-toolbar" });
 		toolbar.createEl("button", { text: "Add files" }).onclick = () => this.showAddFilesModal();
 		toolbar.createEl("button", { text: "Add group" }).onclick = () => this.addGroup();
-		toolbar.createEl("button", { text: "New canvas", title: "Create new canvas file" }).onclick = () => void this.createNewCanvasFile();
 
 		const viewport = this.contentEl.createDiv({ cls: "heinibal-canvas-viewport" });
 		this.canvasStageEl = viewport.createDiv({ cls: "heinibal-canvas-stage" });
@@ -234,6 +234,16 @@ export class FileCardCanvasView extends FileView {
 				this.isPanning = true;
 				this.panStart = { x: e.clientX - this.pan.x, y: e.clientY - this.pan.y };
 			}
+		});
+		this.registerDomEvent(viewport, "dblclick", (e: MouseEvent) => {
+			const target = e.target as HTMLElement | null;
+			const inNode = target?.closest(".heinibal-node-wrapper");
+			const inMenu = target?.closest(".heinibal-card-submenu") || target?.closest(".heinibal-context-menu");
+			const inToolbar = target?.closest(".heinibal-canvas-toolbar");
+			const inEdge = target?.closest(".heinibal-canvas-edges");
+			if (inNode || inMenu || inToolbar || inEdge) return;
+			const pos = this.clientToCanvas(e.clientX, e.clientY);
+			void this.createNewFileCardAt(pos.x, pos.y);
 		});
 
 		this.registerDomEvent(this.contentEl, "mousedown", (e: MouseEvent) => {
@@ -291,33 +301,41 @@ export class FileCardCanvasView extends FileView {
 			if (this.edgeFrom) {
 					const wrapper = document.elementFromPoint(e.clientX, e.clientY)?.closest(".heinibal-node-wrapper");
 					const toNodeId = wrapper?.getAttribute("data-node-id") ?? null;
-					if (toNodeId && toNodeId !== this.edgeFrom.nodeId) {
-						const toNode = this.canvasData.nodes.find((n) => n.id === toNodeId);
-						const fromNode = this.canvasData.nodes.find((n) => n.id === this.edgeFrom!.nodeId);
-						if (toNode && fromNode) {
-							const pos = this.clientToCanvas(e.clientX, e.clientY);
-							const dropCanvasX = pos.x;
-							const dropCanvasY = pos.y;
-							const { side: toSide, offset: toOffset } = this.getPointOnNodeBorder(toNode, dropCanvasX, dropCanvasY);
-							this.canvasData.edges.push({
-								id: "edge-" + Date.now(),
-							fromNode: this.edgeFrom.nodeId,
-							fromSide: this.edgeFrom.side,
-							fromOffset: 0.5,
-							toNode: toNodeId,
-							toSide,
-							toOffset,
-						});
-						this.renderEdges();
-						void this.saveCanvasData();
+						if (toNodeId && toNodeId !== this.edgeFrom.nodeId) {
+							const toNode = this.canvasData.nodes.find((n) => n.id === toNodeId);
+							const fromNode = this.canvasData.nodes.find((n) => n.id === this.edgeFrom!.nodeId);
+							if (toNode && fromNode) {
+								const fromPt = this.getNodeSidePoint(fromNode, this.edgeFrom.side, 0.5);
+								const dropPos = this.clientToCanvas(e.clientX, e.clientY);
+								const { side: toSide, offset: toOffset } = this.getLineIntersectionOnNodeBorder(
+									toNode,
+									fromPt.x,
+									fromPt.y,
+									dropPos.x,
+									dropPos.y
+								);
+								this.canvasData.edges.push({
+									id: "edge-" + Date.now(),
+									fromNode: this.edgeFrom.nodeId,
+									fromSide: this.edgeFrom.side,
+									fromOffset: 0.5,
+									toNode: toNodeId,
+									toSide,
+									toOffset,
+									fromEnd: "none",
+									toEnd: "arrow",
+									edgeStyle: "curve",
+								});
+								this.renderEdges();
+								void this.saveCanvasData();
+							}
 					}
+					this.finishEdge();
 				}
-				this.finishEdge();
-			}
-			if (this.draggedEdgeControlId) {
-				this.draggedEdgeControlId = null;
-				void this.saveCanvasData();
-			}
+				if (this.draggedEdgeControlId) {
+					this.draggedEdgeControlId = null;
+					void this.saveCanvasData();
+				}
 			this.isPanning = false;
 			this.draggedNodeId = null;
 			if (hadNodeDrag) {
@@ -337,18 +355,59 @@ export class FileCardCanvasView extends FileView {
 	}
 
 	private async createNewCanvasFile(): Promise<void> {
-		const folder = (this.plugin.settings.defaultCanvasFolder ?? "").trim() || undefined;
-		const base = "Untitled Canvas";
-		let name = `${base}.${FileCardCanvasView.HCANVAS_EXT}`;
-		let n = 0;
-		while (this.app.vault.getAbstractFileByPath(folder ? `${folder}/${name}` : name)) {
-			n++;
-			name = `${base} ${n}.${FileCardCanvasView.HCANVAS_EXT}`;
-		}
-		const path = folder ? `${folder}/${name}` : name;
+		const folder = (this.plugin.settings.defaultCanvasFolder ?? "").trim() || null;
+		const path = this.getNextAvailableFilePath(folder, "Untitled Canvas", FileCardCanvasView.HCANVAS_EXT);
 		const file = await this.app.vault.create(path, JSON.stringify(DEFAULT_CANVAS_DATA, null, 2));
 		const leaf = this.app.workspace.getLeaf("split", "vertical");
 		await leaf.openFile(file);
+	}
+
+	private getCanvasFolderPath(): string | null {
+		const canvasFolder = this.file?.parent?.path?.trim();
+		if (canvasFolder) return canvasFolder;
+		const fallback = (this.plugin.settings.defaultCanvasFolder ?? "").trim();
+		return fallback || null;
+	}
+
+	private async createNewFileCardAt(x: number, y: number): Promise<void> {
+		const folder = this.getCanvasFolderPath();
+		const path = this.getNextAvailableFilePath(folder, "Untitled", "md");
+		const file = await this.app.vault.create(path, "");
+		this.addFileToCanvas(file, { x, y });
+		void this.saveCanvasData();
+	}
+
+	private getNextAvailableFilePath(folder: string | null, base: string, ext: string): string {
+		const normalizedFolder = folder?.trim() || "";
+		const inFolder = this.app.vault.getFiles().filter((f) => {
+			const parentPath = f.parent?.path ?? "";
+			return parentPath === normalizedFolder;
+		});
+		const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const escapedExt = ext.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const pattern = new RegExp(`^${escapedBase}(?:\\s*(\\d+))?\\.${escapedExt}$`, "i");
+		const used = new Set<number>();
+		for (const file of inFolder) {
+			const match = file.name.match(pattern);
+			if (!match) continue;
+			if (!match[1]) {
+				used.add(0);
+				continue;
+			}
+			const index = Number(match[1]);
+			if (Number.isFinite(index) && index >= 0) used.add(index);
+		}
+		let next = 0;
+		while (used.has(next)) next++;
+
+		for (let attempt = 0; attempt < 10000; attempt++) {
+			const candidateName = next === 0 ? `${base}.${ext}` : `${base} ${next}.${ext}`;
+			const candidatePath = normalizedFolder ? `${normalizedFolder}/${candidateName}` : candidateName;
+			if (!this.app.vault.getAbstractFileByPath(candidatePath)) return candidatePath;
+			next++;
+		}
+		const fallbackName = `${base}-${Date.now()}.${ext}`;
+		return normalizedFolder ? `${normalizedFolder}/${fallbackName}` : fallbackName;
 	}
 
 	private setupDropZone(dropTarget: HTMLElement): void {
@@ -419,7 +478,10 @@ export class FileCardCanvasView extends FileView {
 					}
 				}
 			}
-			if (added.size > 0) void this.saveCanvasData();
+			if (added.size > 0) {
+				this.autoLinkMutualFiles([...added]);
+				void this.saveCanvasData();
+			}
 			if (duplicated.size > 0) {
 				const count = duplicated.size;
 				new Notice(`File already exists on canvas (${count})`, 2500);
@@ -619,84 +681,115 @@ export class FileCardCanvasView extends FileView {
 				edge.toSide ?? "left",
 				edge.toOffset ?? 0.5
 			);
-			const curve = this.getEdgeCurve(edge, fromPt, toPt);
-			const d = curve.type === "manual"
-				? `M ${fromPt.x} ${fromPt.y} Q ${curve.cx} ${curve.cy} ${toPt.x} ${toPt.y}`
-				: `M ${fromPt.x} ${fromPt.y} C ${curve.c1x} ${curve.c1y} ${curve.c2x} ${curve.c2y} ${toPt.x} ${toPt.y}`;
-			const labelPt = curve.type === "manual"
-				? { x: curve.midX, y: curve.midY }
-				: this.getCubicPoint(
-					fromPt,
-					{ x: curve.c1x, y: curve.c1y },
-					{ x: curve.c2x, y: curve.c2y },
-					toPt,
-					0.5
-				);
-			const handlePt = curve.type === "manual"
-				? { x: curve.midX, y: curve.midY }
-				: this.getCubicPoint(
-					fromPt,
-					{ x: curve.c1x, y: curve.c1y },
-					{ x: curve.c2x, y: curve.c2y },
-					toPt,
-					0.5
-				);
+			const style = edge.edgeStyle ?? "curve";
+			let d = "";
+			let labelPt = { x: 0, y: 0 };
+			let handlePt = { x: 0, y: 0 };
+			let showHandle = false;
+
+			if (style === "straight") {
+				d = `M ${fromPt.x} ${fromPt.y} L ${toPt.x} ${toPt.y}`;
+				labelPt = { x: (fromPt.x + toPt.x) / 2, y: (fromPt.y + toPt.y) / 2 };
+				handlePt = labelPt;
+				} else if (style === "elbow") {
+					const elbow = this.getElbowPath(
+						edge,
+						fromPt,
+						toPt,
+						edge.fromSide ?? "right",
+						edge.toSide ?? "left"
+					);
+					d = elbow.d;
+					labelPt = elbow.label;
+					handlePt = elbow.handle;
+					showHandle = true;
+				} else {
+				const curve = this.getEdgeCurve(edge, fromPt, toPt);
+				if (curve.type === "manual") {
+					d = `M ${fromPt.x} ${fromPt.y} Q ${curve.cx} ${curve.cy} ${toPt.x} ${toPt.y}`;
+					labelPt = { x: curve.midX, y: curve.midY };
+					handlePt = { x: curve.midX, y: curve.midY };
+				} else {
+					d = `M ${fromPt.x} ${fromPt.y} C ${curve.c1x} ${curve.c1y} ${curve.c2x} ${curve.c2y} ${toPt.x} ${toPt.y}`;
+					labelPt = this.getCubicPoint(
+						fromPt,
+						{ x: curve.c1x, y: curve.c1y },
+						{ x: curve.c2x, y: curve.c2y },
+						toPt,
+						0.5
+					);
+					handlePt = labelPt;
+				}
+				showHandle = true;
+			}
 
 			const g = document.createElementNS(svgNS, "g");
 			g.dataset.edgeId = edge.id;
 
 			const hitPath = document.createElementNS(svgNS, "path");
 			hitPath.setAttribute("d", d);
-				hitPath.setAttribute("fill", "none");
-				hitPath.setAttribute("stroke", "transparent");
-				hitPath.setAttribute("stroke-width", "16");
-				hitPath.setAttribute("class", "heinibal-edge-path heinibal-edge-hit");
-				g.appendChild(hitPath);
+			hitPath.setAttribute("fill", "none");
+			hitPath.setAttribute("stroke", "transparent");
+			hitPath.setAttribute("stroke-width", "16");
+			hitPath.setAttribute("class", "heinibal-edge-path");
+			hitPath.style.pointerEvents = "stroke";
+			hitPath.style.cursor = "pointer";
+			g.appendChild(hitPath);
 
 			const path = document.createElementNS(svgNS, "path");
 			const color = this.resolveColor(edge.color);
 			path.setAttribute("d", d);
 			path.setAttribute("fill", "none");
 			path.setAttribute("stroke", color);
-				path.setAttribute("stroke-width", "2");
-				path.setAttribute("marker-end", "url(#arrowhead)");
-				path.setAttribute("class", "heinibal-edge-path-visible heinibal-edge-visible");
-				g.appendChild(path);
+			path.setAttribute("stroke-width", "2");
+			if ((edge.fromEnd ?? "none") === "arrow") {
+				path.setAttribute("marker-start", "url(#arrowhead-start)");
+			}
+			if ((edge.toEnd ?? "arrow") === "arrow") {
+				path.setAttribute("marker-end", "url(#arrowhead-end)");
+			}
+			path.setAttribute("class", "heinibal-edge-path-visible");
+			path.style.pointerEvents = "none";
+			g.appendChild(path);
 
 			const text = document.createElementNS(svgNS, "text");
 			text.setAttribute("x", String(labelPt.x));
 			text.setAttribute("y", String(labelPt.y));
 			text.setAttribute("text-anchor", "middle");
 			text.setAttribute("dominant-baseline", "middle");
-					text.setAttribute("class", "heinibal-edge-label");
-					text.setAttribute("font-size", "12");
-					text.textContent = edge.label ?? "";
-					text.addClass("heinibal-edge-label-editable");
-				text.addEventListener("dblclick", (ev) => {
-					ev.preventDefault();
-					ev.stopPropagation();
-					this.openEdgeLabelEditor(edge, ev.clientX, ev.clientY);
-				});
-				g.appendChild(text);
+			text.setAttribute("class", "heinibal-edge-label");
+			text.setAttribute("font-size", "12");
+			text.textContent = edge.label ?? "";
+			text.style.cursor = "pointer";
+			text.addEventListener("click", (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				this.openEdgeLabelEditor(edge, ev.clientX, ev.clientY);
+			});
+			g.appendChild(text);
 
+			if (showHandle) {
 				const handle = document.createElementNS(svgNS, "circle");
 				handle.setAttribute("cx", String(handlePt.x));
 				handle.setAttribute("cy", String(handlePt.y));
 				handle.setAttribute("r", "8");
-				handle.setAttribute("class", "heinibal-edge-handle heinibal-edge-handle-draggable");
-			handle.addEventListener("mousedown", (ev: MouseEvent) => {
-				ev.preventDefault();
-				ev.stopPropagation();
-				const pos = this.clientToCanvas(ev.clientX, ev.clientY);
-				this.draggedEdgeControlPointerOffset = {
-					x: pos.x - handlePt.x,
-					y: pos.y - handlePt.y,
-				};
-				edge.controlX = handlePt.x;
-				edge.controlY = handlePt.y;
-				this.draggedEdgeControlId = edge.id;
-			});
-			g.appendChild(handle);
+				handle.setAttribute("class", "heinibal-edge-handle");
+				handle.style.pointerEvents = "all";
+				handle.style.cursor = "grab";
+				handle.addEventListener("mousedown", (ev: MouseEvent) => {
+					ev.preventDefault();
+					ev.stopPropagation();
+					const pos = this.clientToCanvas(ev.clientX, ev.clientY);
+					this.draggedEdgeControlPointerOffset = {
+						x: pos.x - handlePt.x,
+						y: pos.y - handlePt.y,
+					};
+					edge.controlX = handlePt.x;
+					edge.controlY = handlePt.y;
+					this.draggedEdgeControlId = edge.id;
+				});
+				g.appendChild(handle);
+			}
 
 			hitPath.addEventListener("contextmenu", (ev: MouseEvent) => {
 				ev.preventDefault();
@@ -704,26 +797,41 @@ export class FileCardCanvasView extends FileView {
 				this.renderEdges();
 				void this.saveCanvasData();
 			});
-			hitPath.addEventListener("dblclick", (ev: MouseEvent) => {
+			hitPath.addEventListener("click", (ev: MouseEvent) => {
 				ev.preventDefault();
+				ev.stopPropagation();
 				this.openEdgeLabelEditor(edge, ev.clientX, ev.clientY);
 			});
 			this.edgesContainer.appendChild(g);
 		}
 
 		const defs = document.createElementNS(svgNS, "defs");
-		const marker = document.createElementNS(svgNS, "marker");
-		marker.setAttribute("id", "arrowhead");
-		marker.setAttribute("markerWidth", "10");
-		marker.setAttribute("markerHeight", "7");
-		marker.setAttribute("refX", "9");
-		marker.setAttribute("refY", "3.5");
-		marker.setAttribute("orient", "auto");
-		const poly = document.createElementNS(svgNS, "polygon");
-		poly.setAttribute("points", "0 0, 10 3.5, 0 7");
-		poly.setAttribute("fill", "context-stroke");
-		marker.appendChild(poly);
-		defs.appendChild(marker);
+		const markerEnd = document.createElementNS(svgNS, "marker");
+		markerEnd.setAttribute("id", "arrowhead-end");
+		markerEnd.setAttribute("markerWidth", "10");
+		markerEnd.setAttribute("markerHeight", "7");
+		markerEnd.setAttribute("refX", "9");
+		markerEnd.setAttribute("refY", "3.5");
+		markerEnd.setAttribute("orient", "auto");
+		const polyEnd = document.createElementNS(svgNS, "polygon");
+		polyEnd.setAttribute("points", "0 0, 10 3.5, 0 7");
+		polyEnd.setAttribute("fill", "context-stroke");
+		markerEnd.appendChild(polyEnd);
+
+		const markerStart = document.createElementNS(svgNS, "marker");
+		markerStart.setAttribute("id", "arrowhead-start");
+		markerStart.setAttribute("markerWidth", "10");
+		markerStart.setAttribute("markerHeight", "7");
+		markerStart.setAttribute("refX", "1");
+		markerStart.setAttribute("refY", "3.5");
+		markerStart.setAttribute("orient", "auto-start-reverse");
+		const polyStart = document.createElementNS(svgNS, "polygon");
+		polyStart.setAttribute("points", "0 0, 10 3.5, 0 7");
+		polyStart.setAttribute("fill", "context-stroke");
+		markerStart.appendChild(polyStart);
+
+		defs.appendChild(markerEnd);
+		defs.appendChild(markerStart);
 		this.edgesContainer.prepend(defs);
 	}
 
@@ -807,7 +915,7 @@ export class FileCardCanvasView extends FileView {
 		}
 	}
 
-	/** Closest point on node border to (canvasX, canvasY); returns side and offset 0–1 */
+	/** Closest point on node border to (canvasX, canvasY); returns side and offset 0鈥? */
 	private getPointOnNodeBorder(
 		node: AllCanvasNodeData,
 		canvasX: number,
@@ -832,6 +940,62 @@ export class FileCardCanvasView extends FileView {
 		if (min === dLeft) return { side: "left", offset: oLeft };
 		if (min === dTop) return { side: "top", offset: oTop };
 		return { side: "bottom", offset: oBottom };
+	}
+
+	private getLineIntersectionOnNodeBorder(
+		node: AllCanvasNodeData,
+		fromX: number,
+		fromY: number,
+		toX: number,
+		toY: number
+	): { side: NodeSide; offset: number } {
+		const { x, y, width, height } = node;
+		const dx = toX - fromX;
+		const dy = toY - fromY;
+		const eps = 1e-6;
+		const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
+		const candidates: Array<{ t: number; side: NodeSide; offset: number }> = [];
+		const addCandidate = (t: number, side: NodeSide, offset: number): void => {
+			if (!Number.isFinite(t)) return;
+			if (t < -eps || t > 1 + eps) return;
+			candidates.push({ t, side, offset: clamp01(offset) });
+		};
+
+		if (Math.abs(dx) > eps) {
+			const tLeft = (x - fromX) / dx;
+			const yLeft = fromY + tLeft * dy;
+			if (yLeft >= y - eps && yLeft <= y + height + eps) {
+				addCandidate(tLeft, "left", (yLeft - y) / height);
+			}
+			const tRight = (x + width - fromX) / dx;
+			const yRight = fromY + tRight * dy;
+			if (yRight >= y - eps && yRight <= y + height + eps) {
+				addCandidate(tRight, "right", (yRight - y) / height);
+			}
+		}
+
+		if (Math.abs(dy) > eps) {
+			const tTop = (y - fromY) / dy;
+			const xTop = fromX + tTop * dx;
+			if (xTop >= x - eps && xTop <= x + width + eps) {
+				addCandidate(tTop, "top", (xTop - x) / width);
+			}
+			const tBottom = (y + height - fromY) / dy;
+			const xBottom = fromX + tBottom * dx;
+			if (xBottom >= x - eps && xBottom <= x + width + eps) {
+				addCandidate(tBottom, "bottom", (xBottom - x) / width);
+			}
+		}
+
+		if (candidates.length === 0) {
+			return this.getPointOnNodeBorder(node, toX, toY);
+		}
+
+		let chosen = candidates[0]!;
+		for (const candidate of candidates) {
+			if (candidate.t > chosen.t) chosen = candidate;
+		}
+		return { side: chosen.side, offset: chosen.offset };
 	}
 
 	private clientToCanvas(clientX: number, clientY: number): { x: number; y: number } {
@@ -873,16 +1037,75 @@ export class FileCardCanvasView extends FileView {
 		});
 		input.value = edge.label ?? "";
 
+		const styleRow = editor.createDiv({ cls: "heinibal-panel-row" });
+		styleRow.createSpan({ text: "Route", cls: "heinibal-panel-label", attr: { title: "Route style" } });
+		const styleSelect = styleRow.createEl("select");
+		const styleOptions: Array<{ value: EdgeStyle; label: string }> = [
+			{ value: "curve", label: "Curve" },
+			{ value: "straight", label: "Straight" },
+			{ value: "elbow", label: "Elbow" },
+		];
+		for (const option of styleOptions) {
+			styleSelect.createEl("option", { value: option.value, text: option.label });
+		}
+		styleSelect.value = edge.edgeStyle ?? "curve";
+
+		const endRow = editor.createDiv({ cls: "heinibal-panel-row" });
+		endRow.createSpan({ text: "Arrow", cls: "heinibal-panel-label", attr: { title: "Arrow type" } });
+		const endSelect = endRow.createEl("select");
+		const endMode = (edge.fromEnd ?? "none") === "arrow"
+			? ((edge.toEnd ?? "arrow") === "arrow" ? "both" : "from")
+			: ((edge.toEnd ?? "arrow") === "arrow" ? "to" : "none");
+		const endOptions = [
+			{ value: "to", label: "Single" },
+			{ value: "both", label: "Double" },
+			{ value: "none", label: "None" },
+			{ value: "from", label: "Reverse" },
+		];
+		for (const option of endOptions) {
+			endSelect.createEl("option", { value: option.value, text: option.label });
+		}
+		endSelect.value = endMode;
+
 		const row = editor.createDiv({ cls: "heinibal-panel-row" });
-		const saveBtn = row.createEl("button", { text: "Save" });
-		const clearBtn = row.createEl("button", { text: "Clear" });
+		const saveBtn = row.createEl("button", { text: "Apply", attr: { title: "Apply" } });
+		const clearBtn = row.createEl("button", { text: "Clear", attr: { title: "Clear label" } });
+
+			const applyVisual = () => {
+				edge.edgeStyle = styleSelect.value as EdgeStyle;
+				if (edge.edgeStyle === "straight") {
+					delete edge.controlX;
+					delete edge.controlY;
+				}
+			switch (endSelect.value) {
+				case "both":
+					edge.fromEnd = "arrow";
+					edge.toEnd = "arrow";
+					break;
+				case "none":
+					edge.fromEnd = "none";
+					edge.toEnd = "none";
+					break;
+				case "from":
+					edge.fromEnd = "arrow";
+					edge.toEnd = "none";
+					break;
+				default:
+					edge.fromEnd = "none";
+					edge.toEnd = "arrow";
+					break;
+			}
+			this.renderEdges();
+		};
 
 		const apply = () => {
 			edge.label = input.value.trim() || undefined;
-			this.renderEdges();
+			applyVisual();
 			void this.saveCanvasData();
 			this.closeEdgeLabelEditor();
 		};
+		styleSelect.onchange = applyVisual;
+		endSelect.onchange = applyVisual;
 
 		saveBtn.onclick = apply;
 		clearBtn.onclick = () => {
@@ -959,11 +1182,18 @@ export class FileCardCanvasView extends FileView {
 	}
 
 	private deleteNodeById(nodeId: string): void {
-		const before = this.canvasData.nodes.length;
-		this.canvasData.nodes = this.canvasData.nodes.filter((n) => n.id !== nodeId);
-		if (this.canvasData.nodes.length === before) return;
+		const index = this.canvasData.nodes.findIndex((n) => n.id === nodeId);
+		if (index < 0) return;
+		this.canvasData.nodes.splice(index, 1);
 		this.canvasData.edges = this.canvasData.edges.filter((e) => e.fromNode !== nodeId && e.toNode !== nodeId);
-		this.renderCanvas();
+		const wrapper = this.nodesContainer?.querySelector(`.heinibal-node-wrapper[data-node-id="${nodeId}"]`);
+		wrapper?.remove();
+		if (this.selectedNodeId === nodeId) {
+			this.hideSubmenu();
+			this.clearSelection();
+			this.closeDetailLeaf();
+		}
+		this.renderEdges();
 		void this.saveCanvasData();
 	}
 
@@ -1013,6 +1243,7 @@ export class FileCardCanvasView extends FileView {
 	private renderNode(node: AllCanvasNodeData): void {
 		const wrapper = this.nodesContainer.createDiv({ cls: "heinibal-node-wrapper" });
 		wrapper.dataset.nodeId = node.id ?? "";
+		if (node.type === "group") wrapper.addClass("is-group");
 
 		const nodeEl = wrapper.createDiv({ cls: "heinibal-canvas-node" });
 		nodeEl.style.width = `${node.width}px`;
@@ -1243,21 +1474,47 @@ export class FileCardCanvasView extends FileView {
 		const panel = wrapper.createDiv({ cls: "heinibal-card-submenu" });
 		this.addNodeContentEditor(panel, node, nodeEl);
 
+		const appearanceRow = panel.createDiv({ cls: "heinibal-panel-row" });
+		const appearanceBtn = appearanceRow.createEl("button", { text: "Style", attr: { title: "Appearance" } });
+		const stylePanel = panel.createDiv({ cls: "heinibal-submenu-panel" });
+		appearanceBtn.onclick = () => stylePanel.classList.toggle("is-open");
+
 		const presetColors = ["1", "2", "3", "4", "5", "6"];
-		const colorRow = panel.createDiv({ cls: "heinibal-panel-row" });
-		colorRow.createSpan({ text: "Color:", cls: "heinibal-panel-label" });
+		const colorRow = stylePanel.createDiv({ cls: "heinibal-panel-row" });
+		colorRow.createSpan({ text: "Color", cls: "heinibal-panel-label", attr: { title: "Color" } });
 		for (const c of presetColors) {
 			const btn = colorRow.createEl("button", { cls: "heinibal-color-btn" });
 			btn.style.backgroundColor = CANVAS_COLORS[c] ?? c;
-			btn.onclick = () => this.setNodeColor(node, nodeEl, CANVAS_COLORS[c] ?? c);
+			btn.onclick = () => {
+				this.setNodeColor(node, nodeEl, CANVAS_COLORS[c] ?? c);
+				const hex = this.nodeColorToHex(node);
+				customColor.value = hex;
+				customHex.value = hex;
+			};
 		}
 		const customColor = colorRow.createEl("input", { attr: { type: "color" } });
 		customColor.className = "heinibal-color-custom";
-		customColor.value = this.nodeColorToHex(node);
-		customColor.oninput = () => this.setNodeColor(node, nodeEl, customColor.value);
+		const customHex = colorRow.createEl("input", { type: "text", cls: "heinibal-color-hex" });
+		customHex.placeholder = "#RRGGBB";
+		const initialHex = this.nodeColorToHex(node);
+		customColor.value = initialHex;
+		customHex.value = initialHex;
+		customColor.oninput = () => {
+			const hex = customColor.value;
+			this.setNodeColor(node, nodeEl, hex);
+			customHex.value = hex;
+		};
+		customHex.oninput = () => {
+			const raw = customHex.value.trim();
+			if (!this.isValidHexColor(raw)) return;
+			const normalized = this.normalizeHexColor(raw);
+			this.setNodeColor(node, nodeEl, normalized);
+			customColor.value = normalized;
+			customHex.value = normalized;
+		};
 
-		const shapeRow = panel.createDiv({ cls: "heinibal-panel-row" });
-		shapeRow.createSpan({ text: "Shape:", cls: "heinibal-panel-label" });
+		const shapeRow = stylePanel.createDiv({ cls: "heinibal-panel-row" });
+		shapeRow.createSpan({ text: "Shape", cls: "heinibal-panel-label", attr: { title: "Shape" } });
 		const shapes: NodeShape[] = ["rectangle", "rounded", "pill"];
 		for (const s of shapes) {
 			const btn = shapeRow.createEl("button", { text: s });
@@ -1267,12 +1524,12 @@ export class FileCardCanvasView extends FileView {
 		if (node.type === "file") {
 			const file = this.app.vault.getAbstractFileByPath(node.file);
 			if (file instanceof TFile) {
-				const openBtn = panel.createEl("button", { text: "Open in right", title: "Already opened; click to focus" });
-				openBtn.onclick = () => void this.openFileInRightPane(file);
+				const openBtn = panel.createEl("button", { text: "Open", title: "Open in right pane" });
+				openBtn.onclick = () => this.openFileInRightPane(file);
 			}
 		}
 
-		const deleteBtn = panel.createEl("button", { text: "Delete", cls: "heinibal-panel-delete" });
+		const deleteBtn = panel.createEl("button", { text: "Delete", cls: "heinibal-panel-delete", attr: { title: "Delete card" } });
 		deleteBtn.onclick = () => {
 			this.hideSubmenu();
 			this.deleteNodeById(node.id);
@@ -1282,7 +1539,7 @@ export class FileCardCanvasView extends FileView {
 
 	private addNodeContentEditor(panel: HTMLElement, node: AllCanvasNodeData, nodeEl: HTMLElement): void {
 		const row = panel.createDiv({ cls: "heinibal-panel-row heinibal-panel-content-row" });
-		row.createSpan({ text: "Content:", cls: "heinibal-panel-label" });
+		row.createSpan({ text: "Content", cls: "heinibal-panel-label", attr: { title: "Content" } });
 
 		if (node.type === "file") {
 			const input = row.createEl("input", { type: "text", placeholder: "Card title override" });
@@ -1334,20 +1591,57 @@ export class FileCardCanvasView extends FileView {
 
 	private nodeColorToHex(node: AllCanvasNodeData): string {
 		const c = node.color;
-		if (c?.startsWith("#")) return c;
+		if (c?.startsWith("#") && this.isValidHexColor(c)) return this.normalizeHexColor(c);
+		if (c?.startsWith("rgb")) {
+			const converted = this.rgbToHex(c);
+			if (converted) return converted;
+		}
 		const preset = c ? CANVAS_COLORS[c] : null;
 		if (preset && preset.startsWith("var(")) {
 			const varName = preset.replace(/^var\(|\)$/g, "").trim();
 			const style = getComputedStyle(document.body);
 			const val = style.getPropertyValue(varName).trim();
-			if (val) return val;
+			if (val) {
+				const converted = this.rgbToHex(val);
+				if (converted) return converted;
+				if (this.isValidHexColor(val)) return this.normalizeHexColor(val);
+			}
 		}
 		return "#7c3aed";
+	}
+
+	private isValidHexColor(value: string): boolean {
+		return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(value);
+	}
+
+	private normalizeHexColor(value: string): string {
+		const v = value.trim();
+		if (v.length === 4) {
+			const r = v[1];
+			const g = v[2];
+			const b = v[3];
+			return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+		}
+		return v.toLowerCase();
+	}
+
+	private rgbToHex(value: string): string | null {
+		const match = value.match(/rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+		if (!match) return null;
+		const toHex = (n: number) => n.toString(16).padStart(2, "0");
+		const r = Math.min(255, Number(match[1]));
+		const g = Math.min(255, Number(match[2]));
+		const b = Math.min(255, Number(match[3]));
+		return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 	}
 
 	private setNodeColor(node: AllCanvasNodeData, nodeEl: HTMLElement, hexOrVar: string): void {
 		node.color = hexOrVar;
 		nodeEl.style.borderLeftColor = hexOrVar;
+		if (node.type === "group") {
+			const bg = this.resolveColor(node.color);
+			nodeEl.style.backgroundColor = `${bg}22`;
+		}
 		void this.saveCanvasData();
 	}
 
@@ -1435,6 +1729,8 @@ export class FileCardCanvasView extends FileView {
 
 	private renderGroupNode(container: HTMLElement, node: CanvasGroupData): void {
 		container.addClass("heinibal-group-node");
+		const bg = this.resolveColor(node.color);
+		container.style.backgroundColor = `${bg}20`;
 		container.createDiv({ cls: "heinibal-node-header" }).createEl("span", { text: node.label || "Group", cls: "heinibal-node-label" });
 	}
 
@@ -1486,23 +1782,90 @@ export class FileCardCanvasView extends FileView {
 		modal.className = "heinibal-add-files-modal";
 		const content = modal.createDiv({ cls: "heinibal-modal-content" });
 		content.createEl("h3", { text: "Add files to canvas" });
+		const search = content.createEl("input", {
+			type: "text",
+			cls: "heinibal-file-search",
+			placeholder: "Search by file name",
+		});
 		const list = content.createDiv({ cls: "heinibal-file-list" });
 		const closeBtn = content.createEl("button", { text: "Close", cls: "heinibal-modal-close" });
 
-		for (const file of files) {
-			if (existingPaths.has(file.path)) continue;
-			const item = list.createEl("div", { cls: "heinibal-file-list-item" });
-			item.textContent = file.path;
-			item.onclick = () => {
-				this.addFileToCanvas(file);
-				existingPaths.add(file.path);
-				item.remove();
-			};
-		}
+		const renderList = (query: string): void => {
+			list.empty();
+			const q = query.trim().toLowerCase();
+			const available = files.filter((file) => !existingPaths.has(file.path));
+			const sorted = q
+				? available
+					.filter((file) => {
+						const base = file.basename.toLowerCase();
+						const path = file.path.toLowerCase();
+						return base.includes(q) || path.includes(q);
+					})
+					.sort((a, b) => {
+						const aPrefix = a.basename.toLowerCase().startsWith(q) ? 0 : 1;
+						const bPrefix = b.basename.toLowerCase().startsWith(q) ? 0 : 1;
+						return aPrefix - bPrefix || a.path.localeCompare(b.path);
+					})
+				: available.sort((a, b) => a.path.localeCompare(b.path));
 
+			for (const file of sorted) {
+				const item = list.createEl("div", { cls: "heinibal-file-list-item" });
+				item.textContent = file.path;
+				item.onclick = () => {
+					this.addFileToCanvas(file);
+					existingPaths.add(file.path);
+					this.autoLinkMutualFiles([file.path]);
+					renderList(search.value);
+				};
+			}
+		};
+
+		search.addEventListener("input", () => renderList(search.value));
+		search.addEventListener("keydown", (e: KeyboardEvent) => {
+			if (e.key !== "Enter") return;
+			const firstItem = list.querySelector(".heinibal-file-list-item") as HTMLElement | null;
+			if (firstItem) firstItem.click();
+		});
+		renderList("");
 		closeBtn.addEventListener("click", () => modal.remove());
 		modal.addEventListener("click", (e) => { if (e.target === modal) modal.remove(); });
 		document.body.appendChild(modal);
+	}
+
+	private getElbowPath(
+		edge: CanvasEdgeData,
+		fromPt: { x: number; y: number },
+		toPt: { x: number; y: number },
+		fromSide: NodeSide,
+		toSide: NodeSide
+	): { d: string; label: { x: number; y: number }; handle: { x: number; y: number } } {
+		const fromHorizontal = fromSide === "left" || fromSide === "right";
+		const toHorizontal = toSide === "left" || toSide === "right";
+		const control = (typeof edge.controlX === "number" && typeof edge.controlY === "number")
+			? { x: edge.controlX, y: edge.controlY }
+			: fromHorizontal !== toHorizontal
+				? {
+					x: fromHorizontal ? toPt.x : fromPt.x,
+					y: fromHorizontal ? fromPt.y : toPt.y,
+				}
+				: {
+					x: (fromPt.x + toPt.x) / 2,
+					y: (fromPt.y + toPt.y) / 2,
+				};
+
+		const p1 = fromHorizontal
+			? { x: control.x, y: fromPt.y }
+			: { x: fromPt.x, y: control.y };
+		const p2 = toHorizontal
+			? { x: control.x, y: toPt.y }
+			: { x: toPt.x, y: control.y };
+
+		const d = `M ${fromPt.x} ${fromPt.y} L ${p1.x} ${p1.y} L ${control.x} ${control.y} L ${p2.x} ${p2.y} L ${toPt.x} ${toPt.y}`;
+		return {
+			d,
+			label: { x: control.x, y: control.y },
+			handle: { x: control.x, y: control.y },
+		};
 	}
 
 	private addFileToCanvas(file: TFile, position?: { x: number; y: number }): void {
@@ -1525,6 +1888,82 @@ export class FileCardCanvasView extends FileView {
 		void this.saveCanvasData();
 	}
 
+	private createEdgeId(): string {
+		return `edge-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+	}
+
+	private hasEdgeBetween(nodeAId: string, nodeBId: string): boolean {
+		return this.canvasData.edges.some((edge) => {
+			return (edge.fromNode === nodeAId && edge.toNode === nodeBId)
+				|| (edge.fromNode === nodeBId && edge.toNode === nodeAId);
+		});
+	}
+
+	private getOutgoingLinkPaths(filePath: string): Set<string> {
+		const file = this.app.vault.getAbstractFileByPath(filePath);
+		if (!(file instanceof TFile)) return new Set();
+		const cache = this.app.metadataCache.getFileCache(file);
+		const links = [...(cache?.links ?? []), ...(cache?.embeds ?? [])];
+		const out = new Set<string>();
+		for (const link of links) {
+			const dest = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
+			if (dest) out.add(dest.path);
+		}
+		return out;
+	}
+
+	private autoLinkMutualFiles(addedPaths: string[]): void {
+		if (addedPaths.length === 0) return;
+		const fileNodes = this.canvasData.nodes.filter((n): n is CanvasFileData => n.type === "file");
+		if (fileNodes.length === 0) return;
+		const nodesByPath = new Map<string, CanvasFileData>();
+		for (const node of fileNodes) {
+			if (!nodesByPath.has(node.file)) nodesByPath.set(node.file, node);
+		}
+		const entries = [...nodesByPath.entries()];
+		const addedSet = new Set(addedPaths);
+		const outgoingCache = new Map<string, Set<string>>();
+		const getOutgoing = (path: string): Set<string> => {
+			const cached = outgoingCache.get(path);
+			if (cached) return cached;
+			const outgoing = this.getOutgoingLinkPaths(path);
+			outgoingCache.set(path, outgoing);
+			return outgoing;
+		};
+		let linked = false;
+		for (let i = 0; i < entries.length; i++) {
+			for (let j = i + 1; j < entries.length; j++) {
+				const entryA = entries[i];
+				const entryB = entries[j];
+				if (!entryA || !entryB) continue;
+				const [pathA, nodeA] = entryA;
+				const [pathB, nodeB] = entryB;
+				if (!addedSet.has(pathA) && !addedSet.has(pathB)) continue;
+				const outgoingA = getOutgoing(pathA);
+				const outgoingB = getOutgoing(pathB);
+				if (!outgoingA.has(pathB) || !outgoingB.has(pathA)) continue;
+				if (this.hasEdgeBetween(nodeA.id, nodeB.id)) continue;
+				this.canvasData.edges.push({
+					id: this.createEdgeId(),
+					fromNode: nodeA.id,
+					fromSide: "right",
+					fromOffset: 0.5,
+					toNode: nodeB.id,
+					toSide: "left",
+					toOffset: 0.5,
+					fromEnd: "arrow",
+					toEnd: "arrow",
+					edgeStyle: "curve",
+				});
+				linked = true;
+			}
+		}
+		if (linked) {
+			this.renderEdges();
+			void this.saveCanvasData();
+		}
+	}
+
 	private addGroup(): void {
 		const data = this.canvasData;
 		const id = `group-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -1542,3 +1981,5 @@ export class FileCardCanvasView extends FileView {
 		void this.saveCanvasData();
 	}
 }
+
+

@@ -43,6 +43,7 @@ export type AllCanvasNodeData = CanvasFileData | CanvasTextData | CanvasLinkData
 
 export type NodeSide = 'top' | 'right' | 'bottom' | 'left';
 export type EdgeEnd = 'none' | 'arrow';
+export type EdgeStyle = 'curve' | 'straight' | 'elbow';
 
 export interface CanvasEdgeData {
 	id: string;
@@ -55,6 +56,7 @@ export interface CanvasEdgeData {
 	toOffset?: number;
 	fromOffset?: number;
 	toEnd?: EdgeEnd;
+	edgeStyle?: EdgeStyle;
 	color?: CanvasColor;
 	label?: string;
 	/** 0 = straight, positive = curve amount (e.g. 0.2-0.5) */
@@ -76,3 +78,4 @@ export interface CanvasInfo {
 	name: string;
 	data: CanvasData;
 }
+
