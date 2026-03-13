@@ -15,6 +15,6 @@ This plugin creates a canvas that users can use to manage their file assets via 
 ![Project Logo](./os-card-canvas.png)
 
 ## 安装方法 / How to install
-1. 将文件夹放在 \仓库\.obsidian\plugins\
+1. 将文件夹放在 \仓库\ .obsidian\plugins\
 2. 在该文件夹下打开cmd，运行 npm install 后再运行 npm run build
 3. 打开obsidian后即可在第三方插件处看到
